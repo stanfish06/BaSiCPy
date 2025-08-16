@@ -1,3 +1,21 @@
+[project]
+name = "BaSiC"
+version = "0.0.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    'hyperactive>=4.4.0',
+    'jax>=0.4.7,<=0.4.7',
+    'jaxlib>=0.4.7,<=0.4.7',
+    'numpy',
+    'pooch',
+    'pydantic>=2.7.0,<3.0.0',
+    'scikit-image',
+    'scipy<1.13',
+    'python-bioformats'
+]
+
 [build-system]
 requires = [
     "setuptools>=42",

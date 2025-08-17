@@ -13,7 +13,9 @@ dependencies = [
     'pydantic>=2.7.0,<3.0.0',
     'scikit-image',
     'scipy<1.13',
-    'python-bioformats'
+    'python-bioformats',
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.10.5",
 ]
 
 [build-system]

@@ -1,13 +1,13 @@
-import bioformats
-import numpy as np
-import tifffile
-import os
-import javabridge
 import argparse
 from pathlib import Path
+
+import bioformats
+import javabridge
+import numpy as np
+import tifffile
+from tqdm import trange
+
 from basicpy import BaSiC
-from tqdm import tqdm, trange
-import sys
 
 myloglevel = "ERROR"
 
@@ -20,7 +20,6 @@ def read_img_stack(path):
     size_y = meta.Pixels.SizeY
     size_x = meta.Pixels.SizeX
     size_c = meta.Pixels.SizeC
-    print(size_z)
 
     stack = np.zeros((size_z, size_y, size_x, size_c), dtype=np.uint16)
     with bioformats.ImageReader(str(path)) as reader:
@@ -59,7 +58,8 @@ def main():
     parser.add_argument(
         "--num_per_batch",
         required=False,
-        default=4,
+        default=2,
+        type=positive_int,
         help="Number of stacks to process per batch",
     )
     args = parser.parse_args()
@@ -93,7 +93,15 @@ def main():
         basic_models = []
         for i in range(stack_full.shape[-1]):
             print(f"Fit: channel {i + 1}")
-            basic = BaSiC(get_darkfield=True)
+            basic = BaSiC(
+                get_darkfield=True,
+                smoothness_darkfield=4,
+                smoothness_flatfield=2,
+                epsilon=0.01,
+                max_iterations=1000,
+                max_reweight_iterations=50,
+                max_reweight_iterations_baseline=25,
+            )
             basic.fit(stack_full[:, :, :, i])
             basic_models.append(basic)
         for i in range(len(stack_list)):
@@ -106,26 +114,28 @@ def main():
                     basic_models[j].transform(stack[:, :, :, j]).astype(np.uint16)
                 )
             print()
-            input_fname = img_files[i]
+            input_fname = img_files_sub[i]
             output_fname = input_fname.parent / f"{input_fname.stem}_corrected.tif"
-            output_fname_original = input_fname.parent / f"{input_fname.stem}.tif"
+            # output_fname_original = input_fname.parent / f"{input_fname.stem}.tif"
             print(f"Save: {output_fname.name}")
             tifffile.imwrite(
                 str(output_fname),
-                stack_correct,
-                metadata={"axes": "ZYXC", "mode": "composite"},
+                np.transpose(np.expand_dims(stack_correct, 0), (0, 1, 4, 2, 3)),
+                imagej=True,
+                metadata={
+                    "axes": "TZCYX",
+                    "spacing": 1.0,
+                    "unit": "um",
+                },
             )
-            tifffile.imwrite(
-                str(output_fname_original),
-                stack,
-                metadata={"axes": "ZYXC", "mode": "composite"},
-            )
+            # tifffile.imwrite(
+            #     str(output_fname_original),
+            #     stack,
+            #     metadata={"axes": "ZYXC", "mode": "composite"},
+            # )
     javabridge.kill_vm()
     print("flat-field correction done")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        sys.exit(1)
+    main()

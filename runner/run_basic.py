@@ -62,6 +62,13 @@ def main():
         type=positive_int,
         help="Number of stacks to process per batch",
     )
+    parser.add_argument(
+        "--down_sample",
+        required=False,
+        default=0,
+        type=float,
+        help="Downsample stack during training",
+    )
     args = parser.parse_args()
 
     print("start flat-field correction")
@@ -102,7 +109,16 @@ def main():
                 max_reweight_iterations=50,
                 max_reweight_iterations_baseline=25,
             )
-            basic.fit(stack_full[:, :, :, i])
+            basic.fit(
+                stack_full[
+                    int(stack_full.shape[0] * args.down_sample / 2) : int(
+                        stack_full.shape[0] * (1 - args.down_sample / 2)
+                    ),
+                    :,
+                    :,
+                    i,
+                ]
+            )
             basic_models.append(basic)
         for i in range(len(stack_list)):
             stack = stack_list[i]

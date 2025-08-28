@@ -131,7 +131,7 @@ def main():
                 )
             print()
             input_fname = img_files_sub[i]
-            output_fname = input_fname.parent / f"{input_fname.stem}_corrected.tif"
+            output_fname = input_fname.parent / f"corrected_{input_fname.stem}.tif"
             # output_fname_original = input_fname.parent / f"{input_fname.stem}.tif"
             print(f"Save: {output_fname.name}")
             tifffile.imwrite(

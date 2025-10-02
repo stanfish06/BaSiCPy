@@ -71,7 +71,7 @@ def find_imgs(root_path, extension):
     if not path.is_dir():
         raise ValueError(f"{root_path} folder does not exist")
 
-    files = [f for f in path.rglob(f"*{extension}")]
+    files = [f for f in path.glob(f"*{extension}")]
     return sorted(files)
 
 

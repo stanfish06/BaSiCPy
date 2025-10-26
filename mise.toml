@@ -1,0 +1,11 @@
+[tools]
+uv = "latest"
+
+[settings]
+python.uv_venv_auto = true
+
+[tasks.sync]
+run = "uv sync"
+
+[tasks.build]
+run = "uv run pyinstaller ./runner/run_basic.py"

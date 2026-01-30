@@ -1,18 +1,17 @@
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import List
 
 myloglevel = "ERROR"
 
-# Configure logging with timestamps
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
 
 def positive_int(value):
     ivalue = int(value)
@@ -20,6 +19,23 @@ def positive_int(value):
         raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
     return ivalue
 
+def set_envs(num_process: int):
+    logger = logging.getLogger(__name__)
+    total_cpus = os.cpu_count() or 1
+    threads_per_process = max(1, total_cpus // num_process)
+
+    os.environ["XLA_FLAGS"] = (
+        f"--xla_cpu_multi_thread_eigen=true "
+        f"intra_op_parallelism_threads={threads_per_process}"
+    )
+    os.environ["OMP_NUM_THREADS"] = str(threads_per_process)
+    os.environ["MKL_NUM_THREADS"] = str(threads_per_process)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_process)
+
+    logger.info(
+        f"CPU allocation: {total_cpus} total CPUs, {num_process} processes, "
+        f"{threads_per_process} threads per process"
+    )
 
 parser = argparse.ArgumentParser(description="Run flat-field correction using BaSiC")
 parser.add_argument(
@@ -61,9 +77,6 @@ import javabridge
 import numpy as np
 import tifffile
 from tqdm import trange
-
-from basicpy import BaSiC
-
 
 def read_img_stack(path, quiet=False):
     meta = bioformats.get_omexml_metadata(str(path))
@@ -113,7 +126,6 @@ def read_img_stack(path, quiet=False):
     }
     return stack, meta
 
-
 def save_img_stack(path: str, img, meta):
     px = meta.get("pixel_size_x")
     py = meta.get("pixel_size_y")
@@ -134,7 +146,6 @@ def save_img_stack(path: str, img, meta):
         },
     )
 
-
 def find_imgs(root_path, extension):
     path = Path(root_path)
     if not path.is_dir():
@@ -143,6 +154,10 @@ def find_imgs(root_path, extension):
     files = [f for f in path.glob(f"*{extension}")]
     return sorted(files)
 
+# envs must be set before importing jax
+args = parser.parse_args()
+set_envs(args.num_process)
+from basicpy import BaSiC
 
 def basic_worker(
     file_list: List,
@@ -271,9 +286,7 @@ def basic_worker(
     logger.info(f"{batch_prefix} Batch processing completed")
     javabridge.kill_vm()
 
-
 def main():
-    args = parser.parse_args()
     logger = logging.getLogger(__name__)
 
     logger.info("Starting flat-field correction")
@@ -323,7 +336,6 @@ def main():
                 parallel=False,
             )
     logger.info("Flat-field correction completed successfully")
-
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,6 @@
 # roadmap
 - [ ] support dask
 - [ ] support zarr
+- [ ] how to better split batches? spatial proximity? blocks?
+- [ ] to prevent time-out, immediately output once finish each channel
+- [ ] share models between channels

@@ -66,6 +66,20 @@ parser.add_argument(
     type=float,
     help="Downsample stack during tuning: increases this value from 0 up to 1 if tuning is slow.",
 )
+parser.add_argument(
+    "--wall_time",
+    required=False,
+    default=0,
+    type=float,
+    help="Wall time limit per batch in minutes. If exceeded, retry with halved iteration params. 0 = no limit (default: 0)",
+)
+parser.add_argument(
+    "--max_retries",
+    required=False,
+    default=3,
+    type=positive_int,
+    help="Max retries with reduced params when wall time is exceeded (default: 3)",
+)
 # print help if nothing provided
 if len(sys.argv) == 1:
     parser.print_help(sys.stderr)
@@ -166,6 +180,8 @@ def basic_worker(
     tune_down_sample: float,
     quiet: bool = False,
     parallel: bool = False,
+    iter_params: dict = None,
+    reading_done_event=None,
 ):
     logger = logging.getLogger(__name__)
     javabridge.start_vm(class_path=bioformats.JARS)
@@ -186,7 +202,22 @@ def basic_worker(
     )
     batch_prefix = f"[Batch {batch_id}]"
 
-    logger.info(f"{batch_prefix} Starting batch with {len(file_list)} files")
+    if iter_params is None:
+        iter_params = {
+            "max_iterations": 1000,
+            "max_reweight_iterations": 50,
+            "max_reweight_iterations_baseline": 25,
+            "optimization_tol": 1e-3,
+            "reweighting_tol": 1e-2,
+        }
+
+    logger.info(
+        f"{batch_prefix} Starting batch with {len(file_list)} files "
+        f"(max_iter={iter_params['max_iterations']}, "
+        f"max_reweight={iter_params['max_reweight_iterations']}, "
+        f"opt_tol={iter_params['optimization_tol']:.1e}, "
+        f"reweight_tol={iter_params['reweighting_tol']:.1e})"
+    )
 
     stack_list = []
     meta_list = []
@@ -195,6 +226,9 @@ def basic_worker(
         img, meta = read_img_stack(f, quiet=quiet)
         stack_list.append(img)
         meta_list.append(meta)
+
+    if reading_done_event is not None:
+        reading_done_event.set()
 
     # concatenate along z
     stack_full = np.concatenate(stack_list, 1)
@@ -209,9 +243,7 @@ def basic_worker(
         logger.info(f"{batch_prefix} Fitting channel {i + 1}/{stack_full.shape[2]}")
         basic = BaSiC(
             get_darkfield=True,
-            max_iterations=1000,
-            max_reweight_iterations=50,
-            max_reweight_iterations_baseline=25,
+            **iter_params,
         )
         if tune:
             try:
@@ -245,9 +277,7 @@ def basic_worker(
                     smoothness_darkfield=4,
                     smoothness_flatfield=2,
                     sparse_cost_darkfield=0.01,
-                    max_iterations=1000,
-                    max_reweight_iterations=50,
-                    max_reweight_iterations_baseline=25,
+                    **iter_params,
                 )
         # TODO: supports time series
         logger.info(f"{batch_prefix} Fitting BaSiC model for channel {i + 1}")
@@ -286,6 +316,92 @@ def basic_worker(
     logger.info(f"{batch_prefix} Batch processing completed")
     javabridge.kill_vm()
 
+def run_batch_with_timeout(
+    batch,
+    batch_id,
+    tune,
+    tune_down_sample,
+    quiet,
+    parallel,
+    wall_time_minutes,
+    max_retries,
+):
+    from multiprocessing import Event, Process
+
+    logger = logging.getLogger(__name__)
+
+    iter_params = {
+        "max_iterations": 1000,
+        "max_reweight_iterations": 50,
+        "max_reweight_iterations_baseline": 25,
+        "optimization_tol": 1e-3,
+        "reweighting_tol": 1e-2,
+    }
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            iter_params = {
+                "max_iterations": max(50, iter_params["max_iterations"] // 2),
+                "max_reweight_iterations": max(
+                    2, iter_params["max_reweight_iterations"] // 2
+                ),
+                "max_reweight_iterations_baseline": max(
+                    2, iter_params["max_reweight_iterations_baseline"] // 2
+                ),
+                "optimization_tol": iter_params["optimization_tol"] * 2,
+                "reweighting_tol": iter_params["reweighting_tol"] * 2,
+            }
+            logger.warning(
+                f"[Batch {batch_id}] Retry {attempt}/{max_retries} with reduced params: "
+                f"max_iter={iter_params['max_iterations']}, "
+                f"max_reweight={iter_params['max_reweight_iterations']}, "
+                f"opt_tol={iter_params['optimization_tol']:.1e}, "
+                f"reweight_tol={iter_params['reweighting_tol']:.1e}"
+            )
+
+        reading_done = Event()
+        p = Process(
+            target=basic_worker,
+            args=(batch, batch_id, tune, tune_down_sample, quiet, parallel),
+            kwargs={"iter_params": iter_params, "reading_done_event": reading_done},
+        )
+        p.start()
+
+        while not reading_done.wait(timeout=10):
+            if not p.is_alive():
+                break
+
+        if p.is_alive():
+            p.join(timeout=wall_time_minutes * 60)
+
+        if not p.is_alive():
+            if p.exitcode == 0:
+                if attempt > 0:
+                    logger.info(
+                        f"[Batch {batch_id}] Completed on retry attempt {attempt}"
+                    )
+                return
+            else:
+                logger.error(
+                    f"[Batch {batch_id}] Process crashed with exit code {p.exitcode}"
+                )
+                return
+
+        logger.warning(
+            f"[Batch {batch_id}] Exceeded {wall_time_minutes} min wall time "
+            f"(attempt {attempt + 1}/{max_retries + 1})"
+        )
+        p.terminate()
+        p.join(timeout=10)
+        if p.is_alive():
+            p.kill()
+            p.join()
+
+    logger.error(
+        f"[Batch {batch_id}] Failed after {max_retries + 1} attempts, skipping."
+    )
+
+
 def main():
     logger = logging.getLogger(__name__)
 
@@ -304,7 +420,48 @@ def main():
     logger.info(
         f"Created {len(batches)} batches with up to {n_imgs_per_batch} files per batch"
     )
-    if args.num_process > 1:
+    if args.wall_time > 0:
+        logger.info(
+            f"Wall time enabled: {args.wall_time} min per batch, "
+            f"max {args.max_retries} retries with halved parameters"
+        )
+        if args.num_process > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            logger.info(
+                f"Running in parallel timeout mode with {args.num_process} processes"
+            )
+            with ThreadPoolExecutor(max_workers=args.num_process) as executor:
+                futures = [
+                    executor.submit(
+                        run_batch_with_timeout,
+                        batch,
+                        batch_id,
+                        tune=args.tune,
+                        tune_down_sample=args.tune_down_sample,
+                        quiet=True,
+                        parallel=True,
+                        wall_time_minutes=args.wall_time,
+                        max_retries=args.max_retries,
+                    )
+                    for batch_id, batch in enumerate(batches, 1)
+                ]
+                for f in futures:
+                    f.result()
+        else:
+            logger.info("Running in single-process mode with wall time")
+            for batch_id, batch in enumerate(batches, 1):
+                run_batch_with_timeout(
+                    batch,
+                    batch_id,
+                    tune=args.tune,
+                    tune_down_sample=args.tune_down_sample,
+                    quiet=False,
+                    parallel=False,
+                    wall_time_minutes=args.wall_time,
+                    max_retries=args.max_retries,
+                )
+    elif args.num_process > 1:
         from functools import partial
         from multiprocessing import Pool
 

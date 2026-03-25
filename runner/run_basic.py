@@ -42,6 +42,20 @@ def set_envs(num_process: int):
     )
 
 
+def set_cpu_thread_envs(num_threads: int, *, quiet: bool = False):
+    logger = logging.getLogger(__name__)
+    num_threads = max(1, int(num_threads))
+
+    os.environ["OMP_NUM_THREADS"] = str(num_threads)
+    os.environ["MKL_NUM_THREADS"] = str(num_threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
+    os.environ["VECLIB_MAXIMUM_THREADS"] = str(num_threads)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
+
+    if not quiet:
+        logger.info(f"CPU thread limit set to {num_threads}")
+
+
 parser = argparse.ArgumentParser(description="Run flat-field correction using BaSiC")
 parser.add_argument(
     "--path", required=True, help="Root folder path where images are stored"
@@ -137,6 +151,20 @@ def is_rosetta_translated() -> bool:
         return False
 
     return result.returncode == 0 and result.stdout.strip() == "1"
+
+
+def configure_torch_threading(num_threads: int):
+    try:
+        import torch
+    except ImportError:
+        return
+
+    torch.set_num_threads(num_threads)
+    try:
+        torch.set_num_interop_threads(num_threads)
+    except RuntimeError:
+        # PyTorch only allows setting interop threads before parallel work starts.
+        pass
 
 
 def get_processing_mode(args_num_process: int) -> tuple[str, bool, str]:
@@ -480,15 +508,22 @@ def run_batch_with_timeout(
 def main():
     logger = logging.getLogger(__name__)
     args = parser.parse_args()
-    processing_mode, _, device = get_processing_mode(args.num_process)
 
     if is_rosetta_translated():
-        logger.info("Rosetta-translated macOS environment detected; disabling MPS")
+        set_cpu_thread_envs(1, quiet=True)
+        logger.info(
+            "Rosetta-translated macOS environment detected; disabling MPS and "
+            "limiting CPU threads to 1"
+        )
+
+    processing_mode, _, device = get_processing_mode(args.num_process)
 
     if processing_mode == "multiprocessing":
         set_envs(args.num_process)
         logger.info(f"CPU mode: Using {args.num_process} process(es)")
     elif processing_mode == "single":
+        if is_rosetta_translated():
+            configure_torch_threading(1)
         logger.info("CPU mode: Using single process")
     else:
         logger.info(f"GPU mode: Using {device} device with PyTorch backend")

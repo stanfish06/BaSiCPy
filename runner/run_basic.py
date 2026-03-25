@@ -508,13 +508,20 @@ def run_batch_with_timeout(
 def main():
     logger = logging.getLogger(__name__)
     args = parser.parse_args()
+    rosetta = is_rosetta_translated()
 
-    if is_rosetta_translated():
+    if rosetta:
         set_cpu_thread_envs(1, quiet=True)
         logger.info(
             "Rosetta-translated macOS environment detected; disabling MPS and "
             "limiting CPU threads to 1"
         )
+        if args.num_process > 1:
+            logger.warning(
+                "Rosetta-translated macOS does not support stable multiprocessing "
+                "for this Bio-Formats runner; forcing single-process mode"
+            )
+            args.num_process = 1
 
     processing_mode, _, device = get_processing_mode(args.num_process)
 

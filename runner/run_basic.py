@@ -1,6 +1,8 @@
 import argparse
+import functools
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -110,12 +112,31 @@ def check_gpu_available() -> tuple[bool, str]:
 
         if torch.cuda.is_available():
             return True, "cuda"
-        elif torch.backends.mps.is_available():
+        elif torch.backends.mps.is_available() and not is_rosetta_translated():
             return True, "mps"
         else:
             return False, "cpu"
     except ImportError:
         return False, "cpu"
+
+
+@functools.lru_cache(maxsize=1)
+def is_rosetta_translated() -> bool:
+    """Return True when running under Rosetta translation on macOS."""
+    if sys.platform != "darwin":
+        return False
+
+    try:
+        result = subprocess.run(
+            ["sysctl", "-in", "sysctl.proc_translated"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+
+    return result.returncode == 0 and result.stdout.strip() == "1"
 
 
 def get_processing_mode(args_num_process: int) -> tuple[str, bool, str]:
@@ -460,6 +481,9 @@ def main():
     logger = logging.getLogger(__name__)
     args = parser.parse_args()
     processing_mode, _, device = get_processing_mode(args.num_process)
+
+    if is_rosetta_translated():
+        logger.info("Rosetta-translated macOS environment detected; disabling MPS")
 
     if processing_mode == "multiprocessing":
         set_envs(args.num_process)

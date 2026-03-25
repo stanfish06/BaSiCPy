@@ -226,12 +226,14 @@ def basic_worker(
     parallel: bool = False,
     iter_params: dict = None,
     reading_done_event=None,
+    manage_jvm: bool = True,
 ):
     # Delay the import so spawned workers can import this module safely.
     from basicpy import BaSiC
 
     logger = logging.getLogger(__name__)
-    javabridge.start_vm(class_path=bioformats.JARS)
+    if manage_jvm:
+        javabridge.start_vm(class_path=bioformats.JARS)
     rootLoggerName = javabridge.get_static_field(
         "org/slf4j/Logger", "ROOT_LOGGER_NAME", "Ljava/lang/String;"
     )
@@ -266,100 +268,103 @@ def basic_worker(
         f"reweight_tol={iter_params['reweighting_tol']:.1e})"
     )
 
-    stack_list = []
-    meta_list = []
-    for idx, f in enumerate(file_list, 1):
-        logger.info(f"{batch_prefix} Reading file {idx}/{len(file_list)}: {f.name}")
-        img, meta = read_img_stack(f, quiet=quiet)
-        stack_list.append(img)
-        meta_list.append(meta)
+    try:
+        stack_list = []
+        meta_list = []
+        for idx, f in enumerate(file_list, 1):
+            logger.info(f"{batch_prefix} Reading file {idx}/{len(file_list)}: {f.name}")
+            img, meta = read_img_stack(f, quiet=quiet)
+            stack_list.append(img)
+            meta_list.append(meta)
 
-    if reading_done_event is not None:
-        reading_done_event.set()
+        if reading_done_event is not None:
+            reading_done_event.set()
 
-    # concatenate along z
-    stack_full = np.concatenate(stack_list, 1)
-    logger.info(
-        f"{batch_prefix} Concatenated stack shape: {stack_full.shape} "
-        f"(T={stack_full.shape[0]}, Z={stack_full.shape[1]}, C={stack_full.shape[2]})"
-    )
-
-    basic_models = []
-    # fit for each channel
-    for i in range(stack_full.shape[2]):
-        logger.info(f"{batch_prefix} Fitting channel {i + 1}/{stack_full.shape[2]}")
-        basic = BaSiC(
-            get_darkfield=True,
-            **iter_params,
-        )
-        if tune:
-            try:
-                # take center portion of Z-stack for tuning (faster for large stacks)
-                z_start = int(stack_full.shape[1] * tune_down_sample / 2)
-                z_end = int(stack_full.shape[1] * (1 - tune_down_sample / 2))
-                z_slices_used = z_end - z_start
-                logger.info(
-                    f"{batch_prefix} Tuning channel {i + 1} using Z-slices {z_start}:{z_end} "
-                    f"({z_slices_used}/{stack_full.shape[1]} slices)"
-                )
-                basic.autotune(
-                    stack_full[0, z_start:z_end, i, :, :].squeeze(),
-                    init_params={
-                        "smoothness_flatfield": 2,
-                        "smoothness_darkfield": 4,
-                        "sparse_cost_darkfield": 0.01,
-                    },
-                )
-                logger.info(f"{batch_prefix} Tuning completed for channel {i + 1}")
-            except RuntimeError as e:
-                # if tuning failed, use my parameters
-                logger.warning(
-                    f"{batch_prefix} Tuning failed for channel {i + 1}: {e}. "
-                    "Using default parameters."
-                )
-                basic = BaSiC(
-                    get_darkfield=True,
-                    smoothness_darkfield=4,
-                    smoothness_flatfield=2,
-                    sparse_cost_darkfield=0.01,
-                    **iter_params,
-                )
-        # TODO: supports time series
-        logger.info(f"{batch_prefix} Fitting BaSiC model for channel {i + 1}")
-        basic.fit(
-            stack_full[
-                0,
-                :,
-                i,
-                :,
-                :,
-            ].squeeze()
-        )
-        logger.info(f"{batch_prefix} Fitting completed for channel {i + 1}")
-        basic_models.append(basic)
-
-    for i in range(len(stack_list)):
-        stack = stack_list[i]
-        meta = meta_list[i]
-        stack_correct = np.zeros_like(stack, dtype=stack.dtype)
-        input_fname = file_list[i]
+        # concatenate along z
+        stack_full = np.concatenate(stack_list, 1)
         logger.info(
-            f"{batch_prefix} Correcting stack {i + 1}/{len(stack_list)}: {input_fname.name}"
+            f"{batch_prefix} Concatenated stack shape: {stack_full.shape} "
+            f"(T={stack_full.shape[0]}, Z={stack_full.shape[1]}, C={stack_full.shape[2]})"
         )
-        for j in range(stack.shape[2]):
-            print(".", end="", flush=True)
-            stack_correct[0, :, j, :, :] = (
-                basic_models[j]
-                .transform(stack[0, :, j, :, :].squeeze())
-                .astype(np.uint16)
-            )
-        print()
-        output_fname = input_fname.parent / f"corrected_{input_fname.stem}.tif"
-        logger.info(f"{batch_prefix} Saving corrected stack: {output_fname.name}")
-        save_img_stack(str(output_fname), stack_correct, meta)
 
-    logger.info(f"{batch_prefix} Batch processing completed")
-    javabridge.kill_vm()
+        basic_models = []
+        # fit for each channel
+        for i in range(stack_full.shape[2]):
+            logger.info(f"{batch_prefix} Fitting channel {i + 1}/{stack_full.shape[2]}")
+            basic = BaSiC(
+                get_darkfield=True,
+                **iter_params,
+            )
+            if tune:
+                try:
+                    # take center portion of Z-stack for tuning (faster for large stacks)
+                    z_start = int(stack_full.shape[1] * tune_down_sample / 2)
+                    z_end = int(stack_full.shape[1] * (1 - tune_down_sample / 2))
+                    z_slices_used = z_end - z_start
+                    logger.info(
+                        f"{batch_prefix} Tuning channel {i + 1} using Z-slices {z_start}:{z_end} "
+                        f"({z_slices_used}/{stack_full.shape[1]} slices)"
+                    )
+                    basic.autotune(
+                        stack_full[0, z_start:z_end, i, :, :],
+                        init_params={
+                            "smoothness_flatfield": 2,
+                            "smoothness_darkfield": 4,
+                            "sparse_cost_darkfield": 0.01,
+                        },
+                    )
+                    logger.info(f"{batch_prefix} Tuning completed for channel {i + 1}")
+                except RuntimeError as e:
+                    # if tuning failed, use my parameters
+                    logger.warning(
+                        f"{batch_prefix} Tuning failed for channel {i + 1}: {e}. "
+                        "Using default parameters."
+                    )
+                    basic = BaSiC(
+                        get_darkfield=True,
+                        smoothness_darkfield=4,
+                        smoothness_flatfield=2,
+                        sparse_cost_darkfield=0.01,
+                        **iter_params,
+                    )
+            # TODO: supports time series
+            logger.info(f"{batch_prefix} Fitting BaSiC model for channel {i + 1}")
+            basic.fit(
+                stack_full[
+                    0,
+                    :,
+                    i,
+                    :,
+                    :,
+                ]
+            )
+            logger.info(f"{batch_prefix} Fitting completed for channel {i + 1}")
+            basic_models.append(basic)
+
+        for i in range(len(stack_list)):
+            stack = stack_list[i]
+            meta = meta_list[i]
+            stack_correct = np.zeros_like(stack, dtype=stack.dtype)
+            input_fname = file_list[i]
+            logger.info(
+                f"{batch_prefix} Correcting stack {i + 1}/{len(stack_list)}: {input_fname.name}"
+            )
+            for j in range(stack.shape[2]):
+                print(".", end="", flush=True)
+                stack_correct[0, :, j, :, :] = (
+                    basic_models[j]
+                    .transform(stack[0, :, j, :, :], use_tqdm=False)
+                    .astype(np.uint16)
+                )
+            print()
+            output_fname = input_fname.parent / f"corrected_{input_fname.stem}.tif"
+            logger.info(f"{batch_prefix} Saving corrected stack: {output_fname.name}")
+            save_img_stack(str(output_fname), stack_correct, meta)
+
+        logger.info(f"{batch_prefix} Batch processing completed")
+    finally:
+        if manage_jvm:
+            javabridge.kill_vm()
 
 
 def run_batch_with_timeout(
@@ -481,15 +486,20 @@ def main():
 
     if processing_mode == "gpu":
         logger.info(f"GPU mode: Processing {len(batches)} batches on {device}")
-        for batch_id, batch in enumerate(batches, 1):
-            basic_worker(
-                batch,
-                batch_id=batch_id,
-                tune=args.tune,
-                tune_down_sample=args.tune_down_sample,
-                quiet=False,
-                parallel=False,
-            )
+        javabridge.start_vm(class_path=bioformats.JARS)
+        try:
+            for batch_id, batch in enumerate(batches, 1):
+                basic_worker(
+                    batch,
+                    batch_id=batch_id,
+                    tune=args.tune,
+                    tune_down_sample=args.tune_down_sample,
+                    quiet=False,
+                    parallel=False,
+                    manage_jvm=False,
+                )
+        finally:
+            javabridge.kill_vm()
     elif processing_mode == "multiprocessing":
         if args.wall_time > 0:
             logger.info(
@@ -539,8 +549,8 @@ def main():
                 )
     else:
         logger.info("Running in single-process CPU mode")
-        for batch_id, batch in enumerate(batches, 1):
-            if args.wall_time > 0:
+        if args.wall_time > 0:
+            for batch_id, batch in enumerate(batches, 1):
                 run_batch_with_timeout(
                     batch,
                     batch_id,
@@ -551,15 +561,21 @@ def main():
                     wall_time_minutes=args.wall_time,
                     max_retries=args.max_retries,
                 )
-            else:
-                basic_worker(
-                    batch,
-                    batch_id=batch_id,
-                    tune=args.tune,
-                    tune_down_sample=args.tune_down_sample,
-                    quiet=False,
-                    parallel=False,
-                )
+        else:
+            javabridge.start_vm(class_path=bioformats.JARS)
+            try:
+                for batch_id, batch in enumerate(batches, 1):
+                    basic_worker(
+                        batch,
+                        batch_id=batch_id,
+                        tune=args.tune,
+                        tune_down_sample=args.tune_down_sample,
+                        quiet=False,
+                        parallel=False,
+                        manage_jvm=False,
+                    )
+            finally:
+                javabridge.kill_vm()
     logger.info("Flat-field correction completed successfully")
 
 

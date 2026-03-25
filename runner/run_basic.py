@@ -13,11 +13,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+
 def positive_int(value):
     ivalue = int(value)
     if ivalue <= 0:
         raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
     return ivalue
+
 
 def set_envs(num_process: int):
     logger = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ def set_envs(num_process: int):
         f"{threads_per_process} threads per process"
     )
 
+
 parser = argparse.ArgumentParser(description="Run flat-field correction using BaSiC")
 parser.add_argument(
     "--path", required=True, help="Root folder path where images are stored"
@@ -54,17 +57,19 @@ parser.add_argument(
     required=False,
     default=1,
     type=positive_int,
-    help="Number of parallel processes (default: 1)",
+    help="Number of parallel processes for CPU fallback mode (default: 1). Auto-detects GPU and uses single-process GPU mode if available.",
 )
 parser.add_argument(
-    "--tune", action="store_true", help="Do tuning [recommended] (default: False)"
+    "--tune",
+    action="store_true",
+    help="Do tuning [disabled, haven't tested yet on basic v2] (default: False)",
 )
 parser.add_argument(
     "--tune_down_sample",
     required=False,
     default=0,
     type=float,
-    help="Downsample stack during tuning: increases this value from 0 up to 1 if tuning is slow.",
+    help="Downsample stack during tuning [disabled, basic v2 tuning not tested yet]: increases this value from 0 up to 1 if tuning is slow.",
 )
 parser.add_argument(
     "--wall_time",
@@ -91,6 +96,47 @@ import javabridge
 import numpy as np
 import tifffile
 from tqdm import trange
+
+
+def check_gpu_available() -> tuple[bool, str]:
+    """Check if GPU (CUDA or Apple MPS) is available for PyTorch.
+
+    Returns:
+        tuple: (is_available: bool, device_type: str)
+               device_type is 'cuda', 'mps', or 'cpu'
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return True, "cuda"
+        elif torch.backends.mps.is_available():
+            return True, "mps"
+        else:
+            return False, "cpu"
+    except ImportError:
+        return False, "cpu"
+
+
+def get_processing_mode(args_num_process: int) -> tuple[str, bool, str]:
+    """Determine processing mode based on GPU availability and user args.
+
+    Args:
+        args_num_process: Number of processes requested by user
+
+    Returns:
+        tuple: (mode: str, has_gpu: bool, device: str)
+               mode is 'gpu', 'multiprocessing', or 'single'
+    """
+    has_gpu, device = check_gpu_available()
+
+    if has_gpu:
+        return "gpu", True, device
+    elif args_num_process > 1:
+        return "multiprocessing", False, "cpu"
+    else:
+        return "single", False, "cpu"
+
 
 def read_img_stack(path, quiet=False):
     meta = bioformats.get_omexml_metadata(str(path))
@@ -140,6 +186,7 @@ def read_img_stack(path, quiet=False):
     }
     return stack, meta
 
+
 def save_img_stack(path: str, img, meta):
     px = meta.get("pixel_size_x")
     py = meta.get("pixel_size_y")
@@ -160,6 +207,7 @@ def save_img_stack(path: str, img, meta):
         },
     )
 
+
 def find_imgs(root_path, extension):
     path = Path(root_path)
     if not path.is_dir():
@@ -168,10 +216,6 @@ def find_imgs(root_path, extension):
     files = [f for f in path.glob(f"*{extension}")]
     return sorted(files)
 
-# envs must be set before importing jax
-args = parser.parse_args()
-set_envs(args.num_process)
-from basicpy import BaSiC
 
 def basic_worker(
     file_list: List,
@@ -183,6 +227,9 @@ def basic_worker(
     iter_params: dict = None,
     reading_done_event=None,
 ):
+    # Delay the import so spawned workers can import this module safely.
+    from basicpy import BaSiC
+
     logger = logging.getLogger(__name__)
     javabridge.start_vm(class_path=bioformats.JARS)
     rootLoggerName = javabridge.get_static_field(
@@ -257,8 +304,6 @@ def basic_worker(
                 )
                 basic.autotune(
                     stack_full[0, z_start:z_end, i, :, :].squeeze(),
-                    early_stop=True,
-                    n_iter=10,
                     init_params={
                         "smoothness_flatfield": 2,
                         "smoothness_darkfield": 4,
@@ -316,6 +361,7 @@ def basic_worker(
     logger.info(f"{batch_prefix} Batch processing completed")
     javabridge.kill_vm()
 
+
 def run_batch_with_timeout(
     batch,
     batch_id,
@@ -372,7 +418,10 @@ def run_batch_with_timeout(
                 break
 
         if p.is_alive():
-            p.join(timeout=wall_time_minutes * 60)
+            if wall_time_minutes > 0:
+                p.join(timeout=wall_time_minutes * 60)
+            else:
+                p.join()
 
         if not p.is_alive():
             if p.exitcode == 0:
@@ -404,6 +453,16 @@ def run_batch_with_timeout(
 
 def main():
     logger = logging.getLogger(__name__)
+    args = parser.parse_args()
+    processing_mode, _, device = get_processing_mode(args.num_process)
+
+    if processing_mode == "multiprocessing":
+        set_envs(args.num_process)
+        logger.info(f"CPU mode: Using {args.num_process} process(es)")
+    elif processing_mode == "single":
+        logger.info("CPU mode: Using single process")
+    else:
+        logger.info(f"GPU mode: Using {device} device with PyTorch backend")
 
     logger.info("Starting flat-field correction")
 
@@ -412,7 +471,6 @@ def main():
         f"Found {len(img_files)} files with extension '{args.ext}' in {args.path}"
     )
     n_imgs_per_batch = min(len(img_files), args.num_per_batch)
-    # Create batches of files
     batches = [
         img_files[k : k + n_imgs_per_batch]
         for k in range(0, len(img_files), n_imgs_per_batch)
@@ -420,12 +478,24 @@ def main():
     logger.info(
         f"Created {len(batches)} batches with up to {n_imgs_per_batch} files per batch"
     )
-    if args.wall_time > 0:
-        logger.info(
-            f"Wall time enabled: {args.wall_time} min per batch, "
-            f"max {args.max_retries} retries with halved parameters"
-        )
-        if args.num_process > 1:
+
+    if processing_mode == "gpu":
+        logger.info(f"GPU mode: Processing {len(batches)} batches on {device}")
+        for batch_id, batch in enumerate(batches, 1):
+            basic_worker(
+                batch,
+                batch_id=batch_id,
+                tune=args.tune,
+                tune_down_sample=args.tune_down_sample,
+                quiet=False,
+                parallel=False,
+            )
+    elif processing_mode == "multiprocessing":
+        if args.wall_time > 0:
+            logger.info(
+                f"Wall time enabled: {args.wall_time} min per batch, "
+                f"max {args.max_retries} retries with halved parameters"
+            )
             from concurrent.futures import ThreadPoolExecutor
 
             logger.info(
@@ -449,8 +519,28 @@ def main():
                 for f in futures:
                     f.result()
         else:
-            logger.info("Running in single-process mode with wall time")
-            for batch_id, batch in enumerate(batches, 1):
+            from functools import partial
+            from multiprocessing import Pool
+
+            logger.info(
+                f"Running in multiprocessing mode with {args.num_process} processes"
+            )
+            worker = partial(
+                basic_worker,
+                tune=args.tune,
+                tune_down_sample=args.tune_down_sample,
+                quiet=True,
+                parallel=True,
+            )
+            with Pool(processes=args.num_process) as pool:
+                pool.starmap(
+                    worker,
+                    [(b, i) for i, b in enumerate(batches)],
+                )
+    else:
+        logger.info("Running in single-process CPU mode")
+        for batch_id, batch in enumerate(batches, 1):
+            if args.wall_time > 0:
                 run_batch_with_timeout(
                     batch,
                     batch_id,
@@ -461,38 +551,17 @@ def main():
                     wall_time_minutes=args.wall_time,
                     max_retries=args.max_retries,
                 )
-    elif args.num_process > 1:
-        from functools import partial
-        from multiprocessing import Pool
-
-        logger.info(
-            f"Running in multiprocessing mode with {args.num_process} processes"
-        )
-        # In multiprocessing mode, disable tqdm to avoid conflicts
-        worker = partial(
-            basic_worker,
-            tune=args.tune,
-            tune_down_sample=args.tune_down_sample,
-            quiet=True,
-            parallel=True,
-        )
-        with Pool(processes=args.num_process) as pool:
-            pool.starmap(
-                worker,
-                [(b, i) for i, b in enumerate(batches)],
-            )
-    else:
-        logger.info("Running in single-process mode")
-        for batch_id, batch in enumerate(batches, 1):
-            basic_worker(
-                batch,
-                batch_id=batch_id,
-                tune=args.tune,
-                tune_down_sample=args.tune_down_sample,
-                quiet=False,
-                parallel=False,
-            )
+            else:
+                basic_worker(
+                    batch,
+                    batch_id=batch_id,
+                    tune=args.tune,
+                    tune_down_sample=args.tune_down_sample,
+                    quiet=False,
+                    parallel=False,
+                )
     logger.info("Flat-field correction completed successfully")
+
 
 if __name__ == "__main__":
     main()

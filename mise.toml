@@ -9,3 +9,8 @@ run = "uv sync"
 
 [tasks.build]
 run = "uv run pyinstaller ./runner/run_basic.py"
+
+[tasks.format]
+run = [
+    "pyproject-fmt pyproject.toml || true",
+]

@@ -70,16 +70,28 @@ unused = [
   "torchvision",
 ]
 
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
-]
-
-torchvision = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+# NOTE: this package deliberately does not pin an index for torch.
+#
+# It used to carry:
+#
+#   [tool.uv.sources]
+#   torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+#   torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+#   [[tool.uv.index]]
+#   name = "pytorch-cu128"
+#   url = "https://download.pytorch.org/whl/cu128"
+#   explicit = true
+#
+# uv honours a git/path dependency's `tool.uv.sources`, so that choice did not
+# stay local to this project -- it followed the package into every consumer that
+# installed it with uv. In one downstream project it silently moved *every* Linux
+# torch consumer to a CUDA 2.11.0+cu128 build (splitting the lock across two torch
+# versions by platform, ~2.5 GB of extra wheels), and it could not be overridden
+# downstream: pinning torch to PyPI there makes uv fail outright with
+# "Requirements contain conflicting indexes for package `torch`".
+#
+# Choosing an index is an application/workspace decision, not a library one. A
+# consumer that wants CUDA wheels declares it in its own pyproject; a consumer
+# that wants the default PyPI wheels now gets them. If a CUDA environment is
+# wanted for developing this package, put the sources in a local, uncommitted
+# `uv.toml` instead.

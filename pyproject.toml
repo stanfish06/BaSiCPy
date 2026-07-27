@@ -6,9 +6,14 @@ requires = [
 ]
 
 [project]
-name = "basic"
-version = "0.0.0"
-description = ""
+# Renamed from "basic": the package imports as `basicpy`, and a distribution
+# called `basic` makes every lockfile read like a different project.
+name = "BaSiCPy"
+# Matches the VERSION file (1.2.0) with a PEP 440 post-release: this fork
+# changes packaging metadata only, no library source. A future upstream 1.2.1
+# still sorts above it.
+version = "1.2.0.post1"
+description = "BaSiC shading correction (fork with corrected dependency metadata)"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
@@ -20,19 +25,47 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "hyperactive>=4.4",
+  # Imported at module level by src/basicpy and previously undeclared, so a
+  # clean install could not `import basicpy`: dask.array and torch_dct in
+  # basicpy.py, tqdm in utils.py, tifffile in __main__.py. tifffile and tqdm
+  # happened to arrive via scikit-image and hyperactive; they are declared here
+  # because this package imports them itself.
+  "dask",
+  # Upstream's <5 bound, restored: hyperactive 5 dropped the
+  # `from hyperactive import Hyperactive` /
+  # `hyperactive.optimizers.HillClimbingOptimizer` API that basicpy.py uses,
+  # so >=4.4 alone resolves to 5.x and breaks the autotune path.
+  "hyperactive>=4.4,<5",
+  "numpy",
+  "pooch",
+  "pydantic>=2.7,<3",
+  "scikit-image",
+  # Was scipy<1.13, which transitively capped numpy below 2. The only scipy
+  # usage in this package is `from scipy.fft import dctn` in metrics_numpy.py,
+  # which is unchanged in current scipy.
+  "scipy>=1.11",
+  "tifffile",
+  "torch",
+  "torch-dct",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+# Declared but imported nowhere in src/basicpy. Kept rather than deleted
+# because the notebooks and the runner do use them -- they are simply not
+# runtime dependencies of the library.
+notebooks = [
   "ipykernel>=6.30.1",
   "jax>=0.4.7",
   "jaxlib>=0.4.7",
   "matplotlib>=3.10.5",
-  "numpy",
-  "pooch",
-  "pydantic>=2.7,<3",
-  "pyinstaller>=6.16",
+]
+runner = [
   "python-bioformats",
-  "scikit-image",
-  "scipy<1.13",
-  "torch",
+]
+# Used by neither the package, the notebooks nor the runner.
+unused = [
+  "pyinstaller>=6.16",
   "torchdyn>=1.0.6",
   "torchvision",
 ]
